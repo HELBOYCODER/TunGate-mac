@@ -56,7 +56,24 @@ object Helper {
               '
             }
 
+            proxy_state() {
+              # $1 = "off" or "restore"
+              SVC=`active_service`
+              [ -z "${'$'}SVC" ] && return
+              if [ "${'$'}1" = "off" ]; then
+                networksetup -getwebproxystate "${'$'}SVC" 2>/dev/null | tr -d '\n' > "${'$'}DIR/webproxy.state"
+                networksetup -getsecurewebproxystate "${'$'}SVC" 2>/dev/null | tr -d '\n' > "${'$'}DIR/swproxy.state"
+                networksetup -setwebproxystate "${'$'}SVC" off >/dev/null 2>&1
+                networksetup -setsecurewebproxystate "${'$'}SVC" off >/dev/null 2>&1
+              else
+                case "${'$'}(cat "${'$'}DIR/webproxy.state" 2>/dev/null)" in *"Enabled: Yes"*) networksetup -setwebproxystate "${'$'}SVC" on >/dev/null 2>&1;; esac
+                case "${'$'}(cat "${'$'}DIR/swproxy.state" 2>/dev/null)" in *"Enabled: Yes"*) networksetup -setsecurewebproxystate "${'$'}SVC" on >/dev/null 2>&1;; esac
+                rm -f "${'$'}DIR/webproxy.state" "${'$'}DIR/swproxy.state"
+              fi
+            }
+
             stop_tun() {
+              proxy_state restore
               [ -f "${'$'}DIR/tun.pid" ] && kill `cat "${'$'}DIR/tun.pid"` 2>/dev/null
               rm -f "${'$'}DIR/tun.pid" "${'$'}DIR/utun.name"
               if [ -f "${'$'}DIR/dns_restore" ]; then
@@ -78,6 +95,7 @@ object Helper {
                 start_tunnel)
                   stop_tun
                   sleep 1
+                  proxy_state off
                   TOOL=`cat "${'$'}DIR/tun_tool"`
                   CONF=`cat "${'$'}DIR/current_conf"`
                   [ -f "${'$'}DIR/dns_servers" ] || : > "${'$'}DIR/dns_servers"
@@ -90,7 +108,7 @@ object Helper {
                     fi
                   fi
                   if [ -x "${'$'}TOOL" ] && [ -f "${'$'}CONF" ]; then
-                    nohup "${'$'}TOOL" "${'$'}CONF" "${'$'}DIR/utun.name" >> "${'$'}DIR/tun.log" 2>&1 &
+                    "${'$'}TOOL" "${'$'}CONF" "${'$'}DIR/utun.name" >> "${'$'}DIR/tun.log" 2>&1 &
                     echo ${'$'}! > "${'$'}DIR/tun.pid"
                   fi
                   ;;
@@ -206,10 +224,26 @@ object Helper {
     }
 
     fun startTunnel(confText: String, dns: List<String>): Boolean {
-        val tool = Paths.bundledTool("tungatun")
-        if (tool == null) {
+        val bundled = Paths.bundledTool("tungatun")
+        if (bundled == null) {
             log("The tunnel engine (tungatun) is missing from the app bundle.")
             return false
+        }
+        // Run the engine from our own writable directory: bundle copies can lose the
+        // executable bit, and jpackage strips it on some layouts.
+        val tool = File(dir, "tungatun")
+        // Overwriting in place invalidates the ad-hoc code signature and macOS then
+        // SIGKILLs the binary; always replace it wholesale and re-sign.
+        runCatching {
+            if (!tool.exists() || tool.length() != bundled.length() || tool.lastModified() < bundled.lastModified()) {
+                tool.delete()
+                bundled.copyTo(tool, overwrite = true)
+                tool.setExecutable(true, false)
+                ProcessBuilder("codesign", "-s", "-", "--force", tool.absolutePath)
+                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                    .redirectError(ProcessBuilder.Redirect.DISCARD)
+                    .start().waitFor()
+            }
         }
         val conf = File(dir, "tunnel.conf")
         conf.writeText(confText)

@@ -1,4 +1,4 @@
-// vulpinetun: userspace AmneziaWG/WireGuard tunnel for macOS.
+// tungatun: userspace AmneziaWG/WireGuard tunnel for macOS.
 // Runs as root (via the privileged helper). Creates a utun, applies the
 // interface addresses, drives amneziawg-go over it, and installs the
 // AllowedIPs routes (wg-quick style, with endpoint bypass + half-routes).
@@ -11,6 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"encoding/base64"
+	"encoding/hex"
 	"strconv"
 	"strings"
 	"syscall"
@@ -39,6 +41,15 @@ type ifaceCfg struct {
 	// device-level amnezia params (client profiles carry them under [Peer])
 	jc, jmin, jmax, s1, s2, h1, h2 string
 	peers                          []peerCfg
+}
+
+// WireGuard keys are base64 in .conf files; the uapi expects hex.
+func keyHex(s string) string {
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(s))
+	if err != nil {
+		return s
+	}
+	return hex.EncodeToString(raw)
 }
 
 func run(name string, args ...string) error {
@@ -144,16 +155,26 @@ func parseConf(path string) (*ifaceCfg, error) {
 }
 
 // defaultGateway returns the physical gateway IP for endpoint-bypass routes.
-func defaultGateway() string {
-	for _, iface := range []string{"en0", "en1", "en2", "en3", "en4", "en5"} {
-		out, err := exec.Command("ipconfig", "getoption", iface, "router").Output()
-		if err == nil {
-			if gw := strings.TrimSpace(string(out)); net.ParseIP(gw) != nil {
-				return gw
+func defaultGateway() net.IP {
+	out, err := exec.Command("route", "-n", "get", "default").Output()
+	if err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			if fields := strings.Fields(line); len(fields) == 2 && fields[0] == "gateway:" {
+				if ip := net.ParseIP(fields[1]); ip != nil {
+					return ip
+				}
 			}
 		}
 	}
-	return ""
+	for _, iface := range []string{"en0", "en1", "en2", "en3", "en4", "en5"} {
+		out, err := exec.Command("ipconfig", "getoption", iface, "router").Output()
+		if err == nil {
+			if ip := net.ParseIP(strings.TrimSpace(string(out))); ip != nil {
+				return ip
+			}
+		}
+	}
+	return nil
 }
 
 func splitCidr(cidr string) (ip, ones string, v6 bool, err error) {
@@ -174,33 +195,55 @@ func splitCidr(cidr string) (ip, ones string, v6 bool, err error) {
 	return n.IP.String(), strconv.Itoa(onesBit), n.IP.To4() == nil, nil
 }
 
-func addRoute(cidr, iface string) error {
+// wg-quick trick: a default capture becomes two half-space routes so the
+// pre-existing default route (and endpoint bypass hosts) keep working.
+func expandRoutes(cidr string) []string {
 	ip, ones, v6, err := splitCidr(cidr)
 	if err != nil {
-		return nil // skip unparsable entries rather than failing the tunnel
+		return nil
 	}
-	fam := "-net"
-	if v6 {
-		fam = "-inet6"
+	if !v6 && ip == "0.0.0.0" && ones == "0" {
+		return []string{"0.0.0.0/1", "128.0.0.0/1"}
 	}
-	return run("route", "-n", "add", fam, ip+"/"+ones, "-interface", iface)
+	if v6 && ip == "::" && ones == "0" {
+		return []string{"::/1", "8000::/1"}
+	}
+	return []string{ip + "/" + ones}
+}
+
+func addRoute(cidr, iface string) error {
+	var added []string
+	var lastErr error
+	for _, r := range expandRoutes(cidr) {
+		parts := strings.SplitN(r, "/", 2)
+		fam := "-net"
+		if strings.Contains(parts[0], ":") {
+			fam = "-inet6"
+		}
+		if err := run("route", "-n", "add", fam, r, "-interface", iface); err != nil {
+			lastErr = err
+		} else {
+			added = append(added, r)
+		}
+	}
+	_ = added
+	return lastErr
 }
 
 func delRoute(cidr, iface string) {
-	ip, ones, v6, err := splitCidr(cidr)
-	if err != nil {
-		return
+	for _, r := range expandRoutes(cidr) {
+		parts := strings.SplitN(r, "/", 2)
+		fam := "-net"
+		if strings.Contains(parts[0], ":") {
+			fam = "-inet6"
+		}
+		_ = run("route", "-n", "delete", fam, r, "-interface", iface)
 	}
-	fam := "-net"
-	if v6 {
-		fam = "-inet6"
-	}
-	_ = run("route", "-n", "delete", fam, ip+"/"+ones, "-interface", iface)
 }
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: vulpinetun <amnezia|wireguard .conf> [stateFile]")
+		fmt.Fprintln(os.Stderr, "usage: tungatun <amnezia|wireguard .conf> [stateFile]")
 		os.Exit(2)
 	}
 	cfg, err := parseConf(os.Args[1])
@@ -232,9 +275,15 @@ func main() {
 			return
 		}
 		if v6 {
-			_ = run("ifconfig", tunName, "addinet6", ip, ip, "prefixlen", ones)
+			_ = run("ifconfig", tunName, "addinet6", ip, ip, "prefixlen", ones, "alias")
 		} else {
-			_ = run("ifconfig", tunName, "inet", ip, ip, "-netmask", ones)
+			n, e := strconv.Atoi(ones)
+			if e != nil {
+				return
+			}
+			mask := uint32(0xffffffff) << uint(32-n)
+			dotted := fmt.Sprintf("%d.%d.%d.%d", mask>>24&0xff, mask>>16&0xff, mask>>8&0xff, mask&0xff)
+			_ = run("ifconfig", tunName, "inet", ip, ip, "netmask", dotted, "alias")
 		}
 	}
 	_ = run("ifconfig", tunName, "mtu", strconv.Itoa(cfg.mtu))
@@ -243,64 +292,65 @@ func main() {
 	}
 	_ = run("ifconfig", tunName, "up")
 
-	logger := device.NewLogger(device.LogLevelError, "vulpinetun: ")
+	logger := device.NewLogger(device.LogLevelError, "tungatun: ")
 	dev := device.NewDevice(tunDev, conn.NewDefaultBind(), logger)
 
-	set := func(kv string) {
-		if e := dev.IpcSet(kv); e != nil {
-			fmt.Fprintln(os.Stderr, "uapi", kv, e)
+	var uapi strings.Builder
+	add := func(kv string) { uapi.WriteString(kv); uapi.WriteString("\n") }
+	add("private_key=" + keyHex(cfg.privateKey))
+	if cfg.listenPort != "" {
+		add("listen_port=" + cfg.listenPort)
+	}
+	for _, kv := range []struct{ k, v string }{
+		{"jc", cfg.jc}, {"jmin", cfg.jmin}, {"jmax", cfg.jmax},
+		{"s1", cfg.s1}, {"s2", cfg.s2}, {"h1", cfg.h1}, {"h2", cfg.h2},
+	} {
+		if kv.v != "" {
+			add(kv.k + "=" + kv.v)
 		}
 	}
-	set("private_key=" + cfg.privateKey)
-	if cfg.listenPort != "" {
-		set("listen_port=" + cfg.listenPort)
-	}
-	if cfg.jc != "" {
-		set("jc=" + cfg.jc)
-	}
-	if cfg.jmin != "" {
-		set("jmin=" + cfg.jmin)
-	}
-	if cfg.jmax != "" {
-		set("jmax=" + cfg.jmax)
-	}
-	if cfg.s1 != "" {
-		set("s1=" + cfg.s1)
-	}
-	if cfg.s2 != "" {
-		set("s2=" + cfg.s2)
-	}
-	if cfg.h1 != "" {
-		set("h1=" + cfg.h1)
-	}
-	if cfg.h2 != "" {
-		set("h2=" + cfg.h2)
-	}
-	set("replace_peers=true")
+	add("replace_peers=true")
 	for _, p := range cfg.peers {
-		set("public_key=" + p.publicKey)
+		add("public_key=" + keyHex(p.publicKey))
 		if p.preshared != "" {
-			set("preshared_key=" + p.preshared)
+			add("preshared_key=" + keyHex(p.preshared))
 		}
 		if p.endpoint != "" {
-			set("endpoint=" + p.endpoint)
-			// keep our own handshake reachable: bypass route for the endpoint
+			add("endpoint=" + p.endpoint)
 			host := p.endpoint
 			if h, _, e := net.SplitHostPort(p.endpoint); e == nil {
 				host = h
 			}
-			if gw := defaultGateway(); gw != "" {
+			if gw := defaultGateway(); gw != nil {
 				if ips, e := net.LookupHost(host); e == nil {
 					for _, ip := range ips {
-						_ = run("route", "-n", "add", "-host", ip, gw)
+						_ = run("route", "-n", "add", "-host", ip, gw.String())
 						addedRoutes = append(addedRoutes, "bypass:"+ip)
 					}
 				}
 			}
 		}
 		for _, a := range p.allowedIPs {
-			if err := addRoute(a, tunName); err == nil {
-				addedRoutes = append(addedRoutes, a)
+			for _, r := range expandRoutes(a) {
+				add("allowed_ip=" + r)
+			}
+		}
+	}
+	if err := dev.IpcSet(uapi.String()); err != nil {
+		fmt.Fprintln(os.Stderr, "uapi:", err)
+	}
+
+	// Routes for allowed IPs (the uapi call above only programs the crypto plane).
+	for _, p := range cfg.peers {
+		for _, a := range p.allowedIPs {
+			for _, r := range expandRoutes(a) {
+				fam := "-net"
+				if strings.Contains(strings.SplitN(r, "/", 2)[0], ":") {
+					fam = "-inet6"
+				}
+				if run("route", "-n", "add", fam, r, "-interface", tunName) == nil {
+					addedRoutes = append(addedRoutes, "exact:"+r)
+				}
 			}
 		}
 	}
@@ -320,9 +370,17 @@ func main() {
 
 	dev.Close()
 	for _, r := range addedRoutes {
-		if ip, ok := strings.CutPrefix(r, "bypass:"); ok {
-			_ = run("route", "-n", "delete", "-host", ip)
-		} else {
+		switch {
+		case strings.HasPrefix(r, "bypass:"):
+			_ = run("route", "-n", "delete", "-host", strings.TrimPrefix(r, "bypass:"))
+		case strings.HasPrefix(r, "exact:"):
+			e := strings.TrimPrefix(r, "exact:")
+			fam := "-net"
+			if strings.Contains(strings.SplitN(e, "/", 2)[0], ":") {
+				fam = "-inet6"
+			}
+			_ = run("route", "-n", "delete", fam, e, "-interface", tunName)
+		default:
 			delRoute(r, tunName)
 		}
 	}

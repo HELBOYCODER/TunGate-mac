@@ -38,7 +38,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Dmg)
             packageName = "TunGate"
-            packageVersion = "1.0.0"
+            packageVersion = "1.1.0"
             vendor = "vauth"
             description = "TunGate - WireGuard & AmneziaWG client for macOS"
             appResourcesRootDir = project.layout.projectDirectory.dir("app-resources")

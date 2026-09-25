@@ -15,20 +15,23 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PowerSettingsNew
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -40,6 +43,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -60,8 +64,9 @@ import java.awt.Frame
 import java.io.File
 import kotlin.math.abs
 
-private val FoxOrange = Color(0xFFE8722A)
-private val FoxNavy = Color(0xFF1B2A41)
+private val GateTeal = Color(0xFF2EC4B6)
+private val GateNavy = Color(0xFF14213D)
+private val GateAmber = Color(0xFFFFB703)
 
 fun main() {
     application {
@@ -72,13 +77,16 @@ fun main() {
                 exitApplication()
             },
             title = "TunGate",
-            state = rememberWindowState(width = 460.dp, height = 780.dp),
+            state = rememberWindowState(width = 480.dp, height = 820.dp),
         ) {
             MaterialTheme(
                 colorScheme = MaterialTheme.colorScheme.copy(
-                    primary = FoxOrange,
+                    primary = GateTeal,
                     onPrimary = Color.White,
-                    secondary = FoxNavy,
+                    secondary = GateNavy,
+                    onSecondary = Color.White,
+                    tertiary = GateAmber,
+                    surface = Color(0xFFF7FAFA),
                 ),
             ) {
                 Surface(Modifier.fillMaxSize()) { App() }
@@ -93,19 +101,26 @@ private fun App() {
     var tunnels by remember { mutableStateOf(TunnelStore.load()) }
     var showAdd by remember { mutableStateOf(false) }
     var showLogs by remember { mutableStateOf(false) }
+    var editing by remember { mutableStateOf<StoredTunnel?>(null) }
     val engineState by Engine.state.collectAsState()
+    val pings by Pinger.results.collectAsState()
+
+    LaunchedEffect(tunnels.size) { Pinger.pingAll(tunnels) }
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Filled.Shield, contentDescription = null, tint = FoxOrange)
+                        Icon(Icons.Filled.Shield, contentDescription = null, tint = GateTeal)
                         Spacer(Modifier.width(8.dp))
-                        Text("TunGate", fontWeight = FontWeight.Bold)
+                        Text("TunGate", fontWeight = FontWeight.Bold, color = GateNavy)
                     }
                 },
                 actions = {
+                    IconButton(onClick = { Pinger.pingAll(tunnels) }) {
+                        Icon(Icons.Filled.Refresh, contentDescription = "Refresh pings")
+                    }
                     IconButton(onClick = { showLogs = true }) {
                         Icon(Icons.Filled.Description, contentDescription = "Logs")
                     }
@@ -116,20 +131,12 @@ private fun App() {
         Column(Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp)) {
             StatusCard(engineState)
             Spacer(Modifier.height(16.dp))
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("Tunnels", style = MaterialTheme.typography.titleMedium)
-                IconButton(onClick = { showAdd = true }) {
-                    Icon(Icons.Filled.Add, contentDescription = "Add tunnel", tint = FoxOrange)
-                }
-            }
+            Text("Tunnels", style = MaterialTheme.typography.titleMedium, color = GateNavy)
+            Spacer(Modifier.height(8.dp))
             if (tunnels.isEmpty()) {
                 Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
                     Text(
-                        "No tunnels yet.\nAdd a WireGuard or AmneziaWG .conf file, paste its text, or import a QR image.",
+                        "No tunnels yet.\nAdd a WireGuard or AmneziaWG .conf file,\npaste its text, or import a QR image.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -137,12 +144,27 @@ private fun App() {
             } else {
                 LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(tunnels, key = { it.name + it.addedAt }) { tunnel ->
-                        TunnelRow(tunnel, engineState) {
-                            tunnels = tunnels.filterNot { it === tunnel }.toMutableList()
-                            TunnelStore.save(tunnels)
-                        }
+                        TunnelRow(
+                            tunnel = tunnel,
+                            state = engineState,
+                            ping = pings[tunnel.name],
+                            onEdit = { editing = tunnel },
+                            onDelete = {
+                                if (engineState.tunnelName == tunnel.name) Engine.disconnect()
+                                tunnels = tunnels.filterNot { it === tunnel }.toMutableList()
+                                TunnelStore.save(tunnels)
+                            },
+                        )
                     }
                 }
+            }
+            Spacer(Modifier.height(8.dp))
+            TextButton(
+                onClick = { showAdd = true },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Filled.Add, contentDescription = null, tint = GateTeal)
+                Text("  Add tunnel", color = GateNavy, fontWeight = FontWeight.SemiBold)
             }
             Spacer(Modifier.height(8.dp))
         }
@@ -160,6 +182,19 @@ private fun App() {
         )
     }
 
+    editing?.let { current ->
+        EditTunnelDialog(
+            current = current,
+            otherNames = tunnels.filter { it.name != current.name }.map { it.name }.toSet(),
+            onDismiss = { editing = null },
+            onSave = { updated ->
+                tunnels = tunnels.map { if (it === current) updated else it }.toMutableList()
+                TunnelStore.save(tunnels)
+                editing = null
+            },
+        )
+    }
+
     if (showLogs) {
         LogsDialog(onDismiss = { showLogs = false })
     }
@@ -172,7 +207,7 @@ private fun StatusCard(state: EngineState) {
         Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (connected) FoxOrange.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surfaceVariant,
+            containerColor = if (connected) GateTeal.copy(alpha = 0.18f) else GateNavy.copy(alpha = 0.06f),
         ),
     ) {
         Row(
@@ -181,7 +216,7 @@ private fun StatusCard(state: EngineState) {
         ) {
             Box(
                 Modifier.size(56.dp).background(
-                    if (connected) FoxOrange else MaterialTheme.colorScheme.outlineVariant,
+                    if (connected) GateTeal else GateNavy.copy(alpha = 0.25f),
                     CircleShape,
                 ),
                 contentAlignment = Alignment.Center,
@@ -207,6 +242,7 @@ private fun StatusCard(state: EngineState) {
                     },
                     fontWeight = FontWeight.Bold,
                     fontSize = 17.sp,
+                    color = GateNavy,
                 )
                 if (connected) {
                     Text(
@@ -222,7 +258,7 @@ private fun StatusCard(state: EngineState) {
                 checked = state.state != TunnelState.DISCONNECTED,
                 onCheckedChange = { on ->
                     if (on) {
-                        tunnelsForToggle()?.let { Engine.connect(it) }
+                        lastSelected ?: TunnelStore.load().firstOrNull()?.let { Engine.connect(it) }
                     } else {
                         Engine.disconnect()
                     }
@@ -234,45 +270,68 @@ private fun StatusCard(state: EngineState) {
 
 private var lastSelected: StoredTunnel? = null
 
-private fun tunnelsForToggle(): StoredTunnel? {
-    val tunnels = TunnelStore.load()
-    return lastSelected ?: tunnels.firstOrNull()
-}
-
 @Composable
-private fun TunnelRow(tunnel: StoredTunnel, state: EngineState, onDelete: () -> Unit) {
+private fun TunnelRow(
+    tunnel: StoredTunnel,
+    state: EngineState,
+    ping: String?,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+) {
     val isActive = state.state == TunnelState.CONNECTED && state.tunnelName == tunnel.name
-    var selected by remember { mutableStateOf(lastSelected?.name == tunnel.name) }
     Card(
         Modifier.fillMaxWidth().clickable {
-            selected = true
             lastSelected = tunnel
             if (state.state == TunnelState.DISCONNECTED) Engine.connect(tunnel) else Engine.disconnect()
         },
         shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (isActive || selected) FoxOrange.copy(alpha = 0.10f) else MaterialTheme.colorScheme.surface,
+            containerColor = if (isActive) GateTeal.copy(alpha = 0.14f) else MaterialTheme.colorScheme.surface,
         ),
     ) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text(tunnel.name, fontWeight = FontWeight.SemiBold)
+                Text(tunnel.name, fontWeight = FontWeight.SemiBold, color = GateNavy)
                 val parsed = remember(tunnel.conf) { ConfParser.parse(tunnel.conf, tunnel.name).getOrNull() }
+                val endpoint = parsed?.peers?.firstOrNull()?.endpoint
                 Text(
-                    parsed?.peers?.firstOrNull()?.endpoint?.let { "Endpoint: $it" }
-                        ?: "Invalid config",
+                    buildString {
+                        if (endpoint != null) append(endpoint)
+                        append("  ·  ")
+                        append(
+                            when {
+                                parsed == null -> "invalid config"
+                                parsed.capturesAllTraffic -> "full tunnel"
+                                else -> "split tunnel"
+                            },
+                        )
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+            Text(
+                ping ?: "…",
+                style = MaterialTheme.typography.labelLarge,
+                color = when {
+                    ping == null -> MaterialTheme.colorScheme.outline
+                    ping == "unreachable" -> MaterialTheme.colorScheme.error
+                    else -> GateTeal
+                },
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.width(8.dp))
             if (isActive) {
-                Text("●", color = FoxOrange, fontSize = 18.sp)
-                Spacer(Modifier.width(10.dp))
+                Text("●", color = GateTeal, fontSize = 18.sp)
+                Spacer(Modifier.width(4.dp))
             }
-            IconButton(onClick = onDelete) {
-                Icon(Icons.Filled.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.outline)
+            IconButton(onClick = onEdit, modifier = Modifier.size(32.dp)) {
+                Icon(Icons.Filled.Edit, contentDescription = "Edit", tint = GateNavy, modifier = Modifier.size(18.dp))
+            }
+            IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
+                Icon(Icons.Filled.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.outline, modifier = Modifier.size(18.dp))
             }
         }
     }
@@ -288,8 +347,8 @@ private fun AddTunnelDialog(
     var confText by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
 
-    fun tryAdd(text: String, suggestedName: String) {
-        val parsed = ConfParser.parse(text, suggestedName)
+    fun add(suggestedName: String) {
+        val parsed = ConfParser.parse(confText, suggestedName)
         if (parsed.isFailure) {
             error = parsed.exceptionOrNull()?.message
             return
@@ -297,14 +356,14 @@ private fun AddTunnelDialog(
         var finalName = suggestedName
         var i = 2
         while (finalName in existing) { finalName = "$suggestedName-$i"; i++ }
-        onAdd(StoredTunnel(name = finalName, conf = text))
+        onAdd(StoredTunnel(name = finalName, conf = confText))
     }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Add tunnel") },
         text = {
-            Column {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
@@ -321,9 +380,7 @@ private fun AddTunnelDialog(
                     maxLines = 8,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                error?.let {
-                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                }
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     TextButton(onClick = {
@@ -350,13 +407,135 @@ private fun AddTunnelDialog(
         },
         confirmButton = {
             TextButton(onClick = {
-                val suggested = name.ifBlank { "Tunnel ${existing.size + 1}" }
-                if (confText.isBlank()) {
-                    error = "Provide the config text, a file, or a QR image"
-                } else {
-                    tryAdd(confText, suggested)
-                }
+                if (confText.isBlank()) error = "Provide the config text, a file, or a QR image"
+                else add(name.ifBlank { "Tunnel ${existing.size + 1}" })
             }) { Text("Add") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun EditTunnelDialog(
+    current: StoredTunnel,
+    otherNames: Set<String>,
+    onDismiss: () -> Unit,
+    onSave: (StoredTunnel) -> Unit,
+) {
+    val parsed = remember(current) { ConfParser.parse(current.conf, current.name).getOrNull() }
+    var name by remember { mutableStateOf(current.name) }
+    var privateKey by remember { mutableStateOf(parsed?.privateKey.orEmpty()) }
+    var addresses by remember { mutableStateOf(parsed?.addresses?.joinToString(", ").orEmpty()) }
+    var dns by remember { mutableStateOf(parsed?.dns?.joinToString(", ").orEmpty()) }
+    var mtu by remember { mutableStateOf((parsed?.mtu ?: 1420).toString()) }
+    var listenPort by remember { mutableStateOf(parsed?.listenPort.orEmpty()) }
+    val peer = parsed?.peers?.firstOrNull()
+    var publicKey by remember { mutableStateOf(peer?.publicKey.orEmpty()) }
+    var presharedKey by remember { mutableStateOf(peer?.presharedKey.orEmpty()) }
+    var endpoint by remember { mutableStateOf(peer?.endpoint.orEmpty()) }
+    var allowedIps by remember { mutableStateOf(peer?.allowedIps?.joinToString(", ").orEmpty()) }
+    var keepalive by remember { mutableStateOf(peer?.keepalive.orEmpty()) }
+    var jc by remember { mutableStateOf(peer?.amnezia?.get("Jc").orEmpty()) }
+    var jmin by remember { mutableStateOf(peer?.amnezia?.get("Jmin").orEmpty()) }
+    var jmax by remember { mutableStateOf(peer?.amnezia?.get("Jmax").orEmpty()) }
+    var s1 by remember { mutableStateOf(peer?.amnezia?.get("S1").orEmpty()) }
+    var s2 by remember { mutableStateOf(peer?.amnezia?.get("S2").orEmpty()) }
+    var h1 by remember { mutableStateOf(peer?.amnezia?.get("H1").orEmpty()) }
+    var h2 by remember { mutableStateOf(peer?.amnezia?.get("H2").orEmpty()) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    @Composable
+    fun field(label: String, value: String, set: (String) -> Unit, single: Boolean = true) {
+        OutlinedTextField(
+            value = value,
+            onValueChange = { set(it); error = null },
+            label = { Text(label) },
+            singleLine = single,
+            modifier = Modifier.fillMaxWidth(),
+            textStyle = MaterialTheme.typography.bodySmall,
+        )
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Edit tunnel") },
+        text = {
+            Column(
+                Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                field("Name", name, set = { name = it })
+                Text("Interface", fontWeight = FontWeight.Bold, color = GateNavy, fontSize = 13.sp)
+                field("Private key", privateKey, set = { privateKey = it })
+                field("Addresses (CIDR, comma separated)", addresses, set = { addresses = it })
+                field("DNS servers", dns, set = { dns = it })
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                    Box(Modifier.weight(1f)) { field("MTU", mtu, set = { mtu = it }) }
+                    Box(Modifier.weight(1f)) { field("Listen port", listenPort, set = { listenPort = it }) }
+                }
+                Text("Peer / Server", fontWeight = FontWeight.Bold, color = GateNavy, fontSize = 13.sp)
+                field("Public key", publicKey, set = { publicKey = it })
+                field("Preshared key (optional)", presharedKey, set = { presharedKey = it })
+                field("Endpoint (host:port)", endpoint, set = { endpoint = it })
+                field("Allowed IPs", allowedIps, set = { allowedIps = it })
+                field("Persistent keepalive (s)", keepalive, set = { keepalive = it })
+                Text("AmneziaWG anti-DPI", fontWeight = FontWeight.Bold, color = GateNavy, fontSize = 13.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                    Box(Modifier.weight(1f)) { field("Jc (junk packets)", jc, set = { jc = it }) }
+                    Box(Modifier.weight(1f)) { field("Jmin", jmin, set = { jmin = it }) }
+                    Box(Modifier.weight(1f)) { field("Jmax", jmax, set = { jmax = it }) }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                    Box(Modifier.weight(1f)) { field("S1", s1, set = { s1 = it }) }
+                    Box(Modifier.weight(1f)) { field("S2", s2, set = { s2 = it }) }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                    Box(Modifier.weight(1f)) { field("H1", h1, set = { h1 = it }) }
+                    Box(Modifier.weight(1f)) { field("H2", h2, set = { h2 = it }) }
+                }
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                if (name.isBlank() || name in otherNames) {
+                    error = "Pick a unique non-empty name"
+                    return@TextButton
+                }
+                val amnezia = buildMap {
+                    jc.ifBlank { null }?.let { put("Jc", it) }
+                    jmin.ifBlank { null }?.let { put("Jmin", it) }
+                    jmax.ifBlank { null }?.let { put("Jmax", it) }
+                    s1.ifBlank { null }?.let { put("S1", it) }
+                    s2.ifBlank { null }?.let { put("S2", it) }
+                    h1.ifBlank { null }?.let { put("H1", it) }
+                    h2.ifBlank { null }?.let { put("H2", it) }
+                }
+                val config = WgConfig(
+                    name = name,
+                    privateKey = privateKey.trim(),
+                    addresses = addresses.split(',').map { it.trim() }.filter { it.isNotEmpty() },
+                    dns = dns.split(',').map { it.trim() }.filter { it.isNotEmpty() },
+                    mtu = mtu.trim().toIntOrNull() ?: 1420,
+                    listenPort = listenPort.trim(),
+                    peers = listOf(
+                        WgPeer(
+                            publicKey = publicKey.trim(),
+                            presharedKey = presharedKey.trim(),
+                            endpoint = endpoint.trim(),
+                            allowedIps = allowedIps.split(',').map { it.trim() }.filter { it.isNotEmpty() },
+                            keepalive = keepalive.trim(),
+                            amnezia = amnezia,
+                        ),
+                    ),
+                )
+                val check = ConfParser.parse(config.toConfText(), name)
+                if (check.isFailure) {
+                    error = check.exceptionOrNull()?.message
+                    return@TextButton
+                }
+                onSave(StoredTunnel(name = name, conf = config.toConfText(), addedAt = current.addedAt))
+            }) { Text("Save") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )

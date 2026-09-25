@@ -5,6 +5,8 @@ data class WgPeer(
     val presharedKey: String = "",
     val endpoint: String = "",
     val allowedIps: List<String> = emptyList(),
+    val keepalive: String = "",
+    val amnezia: Map<String, String> = emptyMap(),
 )
 
 data class WgConfig(
@@ -17,9 +19,28 @@ data class WgConfig(
     val peers: List<WgPeer> = emptyList(),
 ) {
     val capturesAllTraffic: Boolean
-        get() = peers.any { p ->
-            p.allowedIps.any { it == "0.0.0.0/0" || it == "::/0" }
-        }
+        get() = peers.any { p -> p.allowedIps.any { it == "0.0.0.0/0" || it == "::/0" } }
+}
+
+private val AMNEZIA_KEYS = setOf("jc", "jmin", "jmax", "s1", "s2", "h1", "h2")
+
+fun WgConfig.toConfText(): String = buildString {
+    appendLine("[Interface]")
+    appendLine("PrivateKey = $privateKey")
+    if (addresses.isNotEmpty()) appendLine("Address = ${addresses.joinToString(", ")}")
+    if (dns.isNotEmpty()) appendLine("DNS = ${dns.joinToString(", ")}")
+    appendLine("MTU = $mtu")
+    if (listenPort.isNotBlank()) appendLine("ListenPort = $listenPort")
+    peers.forEach { p ->
+        appendLine()
+        appendLine("[Peer]")
+        appendLine("PublicKey = ${p.publicKey}")
+        if (p.presharedKey.isNotBlank()) appendLine("PresharedKey = ${p.presharedKey}")
+        if (p.endpoint.isNotBlank()) appendLine("Endpoint = ${p.endpoint}")
+        if (p.allowedIps.isNotEmpty()) appendLine("AllowedIPs = ${p.allowedIps.joinToString(", ")}")
+        if (p.keepalive.isNotBlank()) appendLine("PersistentKeepalive = ${p.keepalive}")
+        p.amnezia.forEach { (k, v) -> appendLine("$k = $v") }
+    }
 }
 
 object ConfParser {
@@ -31,36 +52,38 @@ object ConfParser {
         var mtu = 1420
         var listenPort = ""
         val peers = mutableListOf<WgPeer>()
-        var cur: Map<String, String>? = null
+        var pending: Map<String, String>? = null
 
         fun flushPeer() {
-            val c = cur ?: return
+            val c = pending ?: return
             c["publickey"]?.let { pk ->
                 peers += WgPeer(
                     publicKey = pk,
                     presharedKey = c["presharedkey"].orEmpty(),
                     endpoint = c["endpoint"].orEmpty(),
                     allowedIps = c["allowedips"]?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() }.orEmpty(),
+                    keepalive = c["persistentkeepalive"].orEmpty(),
+                    amnezia = c.filterKeys { it in AMNEZIA_KEYS }
+                        .mapKeys { (k, _) -> k.replaceFirstChar { it.uppercase() } },
                 )
             }
-            cur = null
+            pending = null
         }
 
         val section = LinkedHashMap<String, String>()
         fun closeSection() {
-            if (section.isNotEmpty()) {
-                if (cur == null && section.containsKey("privatekey")) {
-                    privateKey = section["privatekey"].orEmpty()
-                    addresses = section["address"]?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() }.orEmpty()
-                    dns = section["dns"]?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() }.orEmpty()
-                    section["mtu"]?.toIntOrNull()?.let { mtu = it }
-                    listenPort = section["listenport"].orEmpty()
-                } else {
-                    flushPeer()
-                    cur = section.toMap()
-                }
-                section.clear()
+            if (section.isEmpty()) return
+            if (section.containsKey("privatekey")) {
+                privateKey = section["privatekey"].orEmpty()
+                addresses = section["address"]?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() }.orEmpty()
+                dns = section["dns"]?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() }.orEmpty()
+                section["mtu"]?.toIntOrNull()?.let { mtu = it }
+                listenPort = section["listenport"].orEmpty()
+            } else {
+                flushPeer()
+                pending = section.toMap()
             }
+            section.clear()
         }
 
         text.lineSequence().forEach { raw ->
